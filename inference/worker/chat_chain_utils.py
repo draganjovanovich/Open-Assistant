@@ -16,6 +16,7 @@ from settings import settings
 from utils import shared_tokenizer_lock
 
 RESPONSE_MAX_LENGTH = 2048
+DESCRIPTION_FOR_MODEL_MAX_LENGTH = 512
 
 llm_json_parser = HFInference(
     inference_server_url=settings.inference_server_url,
@@ -160,15 +161,28 @@ Here is the fixed JSON object string:</s>{V2_ASST_PREFIX}"""
     return fixed_json
 
 
-def use_tool(tool_name: str, tool_input: str, tools: list) -> str:
-    best_match, best_similarity = max(
-        ((tool, similarity(tool.name, tool_name)) for tool in tools), key=lambda x: x[1], default=(None, 0)
+def select_tool(tool_name: str, tools: list[Tool]) -> Tool | None:
+    tool = next((t for t in tools if t.name in tool_name), None)
+    if tool:
+        return tool
+    tool, tool_similarity = max(
+        ((t, similarity(t.name, tool_name)) for t in tools),
+        key=lambda x: x[1],
+        default=(None, 0),
     )
-    # This should become stricter as we get better models
-    if best_match is not None and best_similarity > 0.75:
-        tool_input = prepare_json(tool_input)
-        return best_match.func(tool_input)
-    return f"ERROR! {tool_name} is not a valid tool. Try again with different tool!"
+    # TODO: make stricter with better models
+    if tool and tool_similarity > 0.75:
+        return tool
+    return None
+
+
+def use_tool(tool_name: str, tool_input: str, tools: list[Tool]) -> str:
+    tool = select_tool(tool_name, tools)
+    if not tool:
+        return f"ERROR! {tool_name} is not a valid tool. Try again with different tool!"
+    prepared_input = prepare_json(tool_input)
+    tool_output = tool.func(prepared_input)
+    return tool_output
 
 
 # Needs more work for errors, error-prompt tweaks are currently based on
@@ -224,7 +238,7 @@ def compose_tools_from_plugin(plugin: inference.PluginEntry | None) -> tuple[str
     if not plugin:
         return "", []
 
-    llm_plugin = prepare_plugin_for_llm(plugin.url)
+    llm_plugin: inference.PluginConfig = prepare_plugin_for_llm(plugin.url)
     if not llm_plugin:
         return "", []
 
@@ -298,9 +312,9 @@ def compose_tools_from_plugin(plugin: inference.PluginEntry | None) -> tuple[str
 
     tools_string = "\n".join([f"> {tool.name}{tool.description}" for tool in tools])
     # This can be long for some plugins, we need to truncate due to ctx limitations
-    plugin_description_for_model = truncate_str(llm_plugin["description_for_model"], 512)
+    plugin_description_for_model = truncate_str(llm_plugin.description_for_model, DESCRIPTION_FOR_MODEL_MAX_LENGTH)
     return (
-        f"{TOOLS_PREFIX}{tools_string}\n\n{llm_plugin['name_for_model']} plugin description:\n{plugin_description_for_model}\n\n{INSTRUCTIONS}",
+        f"{TOOLS_PREFIX}{tools_string}\n\n{llm_plugin.name_for_model} plugin description:\n{plugin_description_for_model}\n\n{INSTRUCTIONS}",
         tools,
     )
 
